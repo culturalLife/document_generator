@@ -1,0 +1,25 @@
+# ─── Environment & Secrets ─────────────────────────────────────────────────────
+# Never commit credentials or API keys to version control.
+.env
+
+# ─── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+ENV/
+
+# ─── Application Logs & Outputs ────────────────────────────────────────────────
+# Logs and reports are dynamic runtime outputs; do not track them in git.
+logs/
+reports/
+
+# ─── Not part of this service ──────────────────────────────────────────────────
+# VMCompatible is backend-only. The frontend lives in docs_gen/frontend.
+frontend/
+
+# ─── OS Files ─────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
