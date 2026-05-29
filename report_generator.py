@@ -317,6 +317,82 @@ def _assemble_docx(content: str, output_path: str, request_id: str = ""):
     logger.info(f"[{request_id}] Document saved → {output_path}")
 
 
+# ─── Section Splitter ─────────────────────────────────────────────────────────
+
+# Matches lines that look like report section headings (after stripping
+# leading whitespace per line):
+#   ## Title
+#   ### 1. Title
+#   ### Title
+#   1. Title   (top-level numbered list items)
+_SECTION_HEADING_RE = re.compile(
+    r"^(?:#{2,4}\s+(?:\d+\.?\s*)?|\d+\.\s)(.+)",
+)
+
+
+def _extract_sections(prompt_text: str) -> list:
+    """
+    Scans the user's prompt for section headings and returns them as an
+    ordered list of title strings.
+
+    Strips leading whitespace from every line before matching so that
+    indented headings (e.g. from raw.txt triple-quoted strings) are detected.
+
+    Detection priority (first-match per line):
+      1. Markdown headings:  ## Title / ### 1. Title / #### Title
+      2. Numbered list items at the start of a line: 1. Title
+
+    Returns an empty list if no headings are found (triggers single-call fallback).
+    """
+    sections = []
+    for line in prompt_text.splitlines():
+        stripped = line.strip()
+        m = _SECTION_HEADING_RE.match(stripped)
+        if m:
+            sections.append(m.group(1).strip())
+    return sections
+
+
+def _build_parts(sections: list, max_parallel: int, min_per_call: int = 1) -> list:
+    """
+    Splits a flat list of section titles into (part_num, sections_desc) tuples
+    ready for ThreadPoolExecutor.
+
+    Rules:
+      - Never creates more workers than there are sections.
+      - Respects min_per_call so tiny prompts don't over-split.
+      - Last chunk absorbs any remainder sections.
+
+    Args:
+        sections:     Ordered list of section title strings.
+        max_parallel: Upper bound on parallel workers (from config).
+        min_per_call: Minimum sections per worker (from config).
+
+    Returns:
+        List of (part_num, directive_string) tuples.
+    """
+    n = min(max_parallel, max(1, len(sections) // max(min_per_call, 1)))
+    n = max(1, min(n, len(sections)))  # clamp: 1 <= n <= len(sections)
+
+    chunk_size = len(sections) // n
+    parts = []
+    for i in range(n):
+        start = i * chunk_size
+        # Last chunk takes everything that remains
+        end = start + chunk_size if i < n - 1 else len(sections)
+        chunk = sections[start:end]
+        bullet_list = "\n".join(f"  - {s}" for s in chunk)
+        desc = (
+            f"Generate ONLY the following sections of the report (in this exact order):\n"
+            f"{bullet_list}\n"
+            f"Do NOT generate any other sections. "
+            f"Start directly with the first section heading. No preamble or postamble."
+        )
+        parts.append((i + 1, desc))
+
+    return parts
+
+
 # ─── Public Entry Point ────────────────────────────────────────────────────────
 
 def generate_report(
@@ -329,7 +405,7 @@ def generate_report(
     Generates the report via parallel Mistral API calls and saves it as a .docx.
 
     Args:
-        prompt_text:       The full prompt (read from prompt.md).
+        prompt_text:       The full prompt (extracted from combined_input).
         data_summary_text: Summarized JSON payload (from summarize_data.clean_data_summary).
         output_path:       Absolute path where the .docx should be saved.
         request_id:        Short UUID for log correlation (injected by api.py).
@@ -340,18 +416,46 @@ def generate_report(
     t_total_start = time.monotonic()
     logger.info(
         f"[{request_id}] Report generation started | model={config.GENERATION_MODEL} "
-        f"| parallel_calls={config.MAX_PARALLEL_CALLS}"
+        f"| parallel_calls={config.MAX_PARALLEL_CALLS} "
+        f"| section_split={config.SECTION_SPLIT_ENABLED}"
     )
 
-    # Section definition — single call; the user's prompt defines the report structure.
-    # For domain-specific multi-part splits, extend the list and adjust MAX_PARALLEL_CALLS in config.
-    parts = [
-        (
-            1,
-            "Generate the complete report as instructed by the user prompt. "
-            "Include all sections, analysis, tables, and recommendations as specified.",
-        ),
-    ]
+    # ── Determine parallel work items ──────────────────────────────────────────
+    if config.SECTION_SPLIT_ENABLED:
+        sections = _extract_sections(prompt_text)
+        logger.info(f"[{request_id}] Detected {len(sections)} section(s) in prompt")
+
+        if sections:
+            parts = _build_parts(
+                sections,
+                max_parallel=config.MAX_PARALLEL_CALLS,
+                min_per_call=config.MIN_SECTIONS_PER_CALL,
+            )
+            logger.info(
+                f"[{request_id}] Split into {len(parts)} parallel part(s) "
+                f"(~{len(sections) // len(parts)} sections each)"
+            )
+        else:
+            logger.warning(
+                f"[{request_id}] No section headings detected in prompt — "
+                f"falling back to single call."
+            )
+            parts = [
+                (
+                    1,
+                    "Generate the complete report as instructed by the user prompt. "
+                    "Include all sections, analysis, tables, and recommendations as specified.",
+                )
+            ]
+    else:
+        logger.info(f"[{request_id}] SECTION_SPLIT_ENABLED=False — using single call.")
+        parts = [
+            (
+                1,
+                "Generate the complete report as instructed by the user prompt. "
+                "Include all sections, analysis, tables, and recommendations as specified.",
+            )
+        ]
 
     results: Dict[int, str] = {}
 

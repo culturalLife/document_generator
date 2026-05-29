@@ -29,9 +29,19 @@ GENERATION_MODEL: str = "mistral-large-latest"
 TEMPERATURE: float = 0.2
 
 # Number of parallel Mistral API calls to fan out during generation.
-# Set to 1 for generic single-call mode (user prompt defines report structure).
-# Increase only if report_generator.py is extended with a multi-part split strategy.
-MAX_PARALLEL_CALLS: int = 1
+# The dynamic section splitter (SECTION_SPLIT_ENABLED=True) distributes the
+# prompt's detected section headings across this many workers automatically.
+# With the default prompt.md (13 sections), 3 workers ≈ 4-5 sections each.
+MAX_PARALLEL_CALLS: int = 3
+
+# When True, report_generator.py will parse section headings out of the user
+# prompt and spread them across MAX_PARALLEL_CALLS parallel Mistral calls.
+# Set to False to revert to a single sequential call (original behaviour).
+SECTION_SPLIT_ENABLED: bool = True
+
+# Minimum number of sections assigned to any single parallel worker.
+# Prevents creating many tiny calls when the prompt has very few headings.
+MIN_SECTIONS_PER_CALL: int = 1
 
 # ─── Input Paths (File-Driven Mode) ────────────────────────────────────────────
 # The pipeline reads these two files from disk at request time.
